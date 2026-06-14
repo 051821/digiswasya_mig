@@ -1,0 +1,336 @@
+new table   	prescription
+
+public	prescription	1	id	uuid	uuid					NO
+
+public	prescription	2	visit_id	uuid	uuid					NO
+
+public	prescription	3	doctor_user_id	uuid	uuid					NO
+
+public	prescription	4	assessment	character varying	varchar					NO
+
+public	prescription	5	provisional_diagnosis	character varying	varchar					YES
+
+public	prescription	6	confirmed_diagnosis	character varying	varchar					YES
+
+public	prescription	7	is_referral_recommended	boolean	bool					NO
+
+public	prescription	8	referral_treatment_name	character varying	varchar					YES
+
+public	prescription	9	referral_specialist_name	character varying	varchar					YES
+
+public	prescription	10	instructions	character varying	varchar					YES
+
+public	prescription	11	follow_up_at	timestamp with time zone	timestamptz				6	YES
+
+public	prescription	12	created_at	timestamp with time zone	timestamptz				6	NO
+
+public	prescription	13	investigation_notes	text	text					YES
+
+public	prescription	14	deleted_at	timestamp with time zone	timestamptz				6	YES
+
+public	prescription	15	patient_instructions	text	text					YES
+
+public	prescription	16	legacy_id	character varying	varchar	120				YES
+
+public	prescription	17	legacy_source	character varying	varchar	60				YES
+
+
+
+legacy 
+
+public	BodyVitals_prescription	1	id	bigint	int8		64	0		NO
+
+public	BodyVitals_prescription	2	prescriptionid	character varying	varchar	20				YES
+
+public	BodyVitals_prescription	3	prescription	character varying	varchar	6144				YES
+
+public	BodyVitals_prescription	4	investigation	character varying	varchar	2048				YES
+
+public	BodyVitals_prescription	5	clinicalnote	character varying	varchar	2048				YES
+
+public	BodyVitals_prescription	6	diagnosis	character varying	varchar	2048				YES
+
+public	BodyVitals_prescription	7	recommendation	character varying	varchar	1024				YES
+
+public	BodyVitals_prescription	8	datetime	timestamp with time zone	timestamptz				6	NO
+
+public	BodyVitals_prescription	9	followupdatetime	timestamp with time zone	timestamptz				6	YES
+
+public	BodyVitals_prescription	10	appdetails_id	integer	int4		32	0		YES
+
+public	BodyVitals_prescription	11	doctor_id	integer	int4		32	0		NO
+
+public	BodyVitals_prescription	12	person_id	integer	int4		32	0		NO
+
+public	BodyVitals_prescription	13	healthcase_id	bigint	int8		64	0		YES
+
+
+
+id	prescriptionid	prescription	investigation	clinicalnote	diagnosis	recommendation	datetime	followupdatetime	appdetails_id	doctor_id	person_id	healthcase_id
+
+10992	vqwrsc	[{"medicine":"Tab omez 20 mg bbf ","instructions":"","morning":true,"afternoon":false,"evening":false},{"medicine":"Tab dicofenac 50 mg bd ","instructions":"","morning":true,"afternoon":false,"evening":true},{"medicine":"Tab amoxyclav 625 mg bd ","instructions":"","morning":true,"afternoon":false,"evening":true}]	[{"investigationcat":"Blood Test","investigationname":""}]	"Headache
+
+H/o  rta "	Headache under evaluation	Plenty of fluid	2025-11-22 06:14:44.267242+00	2025-11-27 06:14:44.265475+00	23	34	10784	11858
+
+24479	2a94tjs	[{"medicine":"Tablet Retoz-Neo 90 ","instructions":"After food ","morning":true,"afternoon":false,"evening":true},{"medicine":"Tablet  Incepcal 500 ","instructions":"After food ","morning":true,"afternoon":false,"evening":true},{"medicine":"Diclofenac gel ","instructions":"Local application ","morning":true,"afternoon":true,"evening":true},{"medicine":"Tab Nervijen ","instructions":"At night ","morning":false,"afternoon":false,"evening":true},{"medicine":"Tab pan d ","instructions":"Before food ","morning":true,"afternoon":false,"evening":false}]	[{"investigationcat":"Blood Test","investigationname":"Nil"}]	"Complain of low back pain - since some days,
+
+No Trauma Or injury noted,
+
+No other abnormal noted
+
+"	Low back ache	Avoid heavy activity	2026-03-05 07:29:56.426656+00	2026-03-20 07:29:56.424828+00	23	22	10784	24108 you know all the logic now i want to write script to migrate prescription
+
+
+newprescription table
+
+id	visit_id	doctor_user_id	assessment	provisional_diagnosis	confirmed_diagnosis	is_referral_recommended	referral_treatment_name	referral_specialist_name	instructions	follow_up_at	created_at	investigation_notes	deleted_at	patient_instructions	legacy_id	legacy_source	source	
+3d6c7a86-a30d-495b-a511-844b17884703	ce3c530b-878e-4f62-801a-f8ab8bd39c73	730f90c9-2530-4dde-8993-fd8fbe434234	Provisional: Complain of Multiple joint pain	Complain of Multiple joint pain		FALSE			Avoid heavy activity		2026-05-06 01:52:18.903858+00:00						web_portal	
+bbed5805-f572-4948-98de-eadf50f36b2e	6480bfbc-2a8c-464a-9313-6669b735621c	89b4a9ec-e7af-40a3-a64e-5c217c94f48f	Provisional: hh	hh		TRUE	demo				2026-05-12 12:31:25.089352+00:00						web_portal	
+530d6abc-220c-49bb-9014-ca9d2cf8c215	943af927-cc8f-4ba0-a89e-11e91f11d2a9	455cf7e0-896d-4c06-9087-068385c5f346	Confirmed: Secondary amenorrhea with vulvovaginitis		Secondary amenorrhea with vulvovaginitis	FALSE			"LMP 13-3-26
+White discharge 
+Back pain
+Itching vaginaly 
+Secondary amenorrhea with vulvovaginitis "		2026-05-16 06:13:09.512227+00:00						web_portal	
+
+
+
+# Prescription Migration — Narsala (appdetails_id = 42)
+
+## Overview
+
+This script migrates `BodyVitals_prescription` records from the legacy DigiSwasthya database
+to the `prescription` table in the new DB, scoped to prescriptions whose healthcase
+belongs to **appdetails_id = 42 (DS-TMC-009 / Narsala)**.
+
+**Script:** `migrate_prescription_appid42.py`
+
+---
+
+## Critical: appdetails_id Mismatch
+
+> ⚠️ The prescriptions for Narsala patients have `appdetails_id = 23` in
+> `BodyVitals_prescription`, NOT `42`.
+
+This is because `appdetails_id` in the prescription table refers to the **doctor's app**,
+not the **center's app**. The link to Narsala is through `healthcase_id`:
+
+```
+BodyVitals_prescription.healthcase_id
+        ↓
+HealthCase_healthcase.id  WHERE appdetails_id = 42
+```
+
+**Confirmed by query:**
+```sql
+SELECT DISTINCT p.appdetails_id, COUNT(*)
+FROM "BodyVitals_prescription" p
+INNER JOIN "HealthCase_healthcase" hc ON hc.id = p.healthcase_id
+WHERE hc.appdetails_id = 42
+GROUP BY p.appdetails_id;
+-- Result: [(23, 2108)]
+-- All 2108 Narsala prescriptions have appdetails_id = 23
+```
+
+So both SQLs filter using a subquery instead of direct `appdetails_id` filter:
+```sql
+WHERE p.healthcase_id IN (
+    SELECT id FROM "HealthCase_healthcase"
+    WHERE appdetails_id = 42
+)
+```
+
+---
+
+## Run Order (Prerequisites)
+
+Must run in this exact order:
+
+```
+1. migrate_patient_appid42.py     ← patient must exist first
+2. migrate_visit_appid42.py       ← visit must exist second
+3. migrate_prescription_appid42.py ← this script runs last
+```
+
+---
+
+## How to Run
+
+```bash
+# Preview only — no DB writes
+python migrate_prescription_appid42.py --preview
+
+# Migrate first 10
+python migrate_prescription_appid42.py --limit 10
+
+# Migrate ALL
+python migrate_prescription_appid42.py
+```
+
+---
+
+## Field Mapping
+
+| New DB Column | Source | Legacy Table | Legacy Column | Notes |
+|---|---|---|---|---|
+| `id` | generated | — | — | New UUID from SafeIDGenerator |
+| `visit_id` | lookup | `visit` (new DB) | `legacy_id` = `healthcase_id` | Resolved via `visit.legacy_id = healthcase_id` |
+| `doctor_user_id` | lookup | `Doctor_doctordetails` | `doctorid` → name + phone | See Doctor Resolution below |
+| `assessment` | direct | `BodyVitals_prescription` | `clinicalnote` | NOT NULL — defaults to `""` if NULL |
+| `provisional_diagnosis` | direct | `BodyVitals_prescription` | `diagnosis` | Full diagnosis goes here |
+| `confirmed_diagnosis` | — | — | — | NULL — no separate confirmed diagnosis in legacy |
+| `is_referral_recommended` | — | — | — | Always `False` — no legacy source |
+| `referral_treatment_name` | direct | `BodyVitals_prescription` | `recommendation` | |
+| `referral_specialist_name` | — | — | — | NULL — no legacy source |
+| `instructions` | direct | `BodyVitals_prescription` | `recommendation` | Same as `referral_treatment_name` |
+| `follow_up_at` | direct | `BodyVitals_prescription` | `followupdatetime` | |
+| `created_at` | direct | `BodyVitals_prescription` | `datetime` | |
+| `investigation_notes` | direct | `BodyVitals_prescription` | `investigation` | Raw JSON string stored as-is |
+| `deleted_at` | — | — | — | NULL |
+| `patient_instructions` | direct | `BodyVitals_prescription` | `prescription` | Medicine list raw JSON string stored as-is |
+| `legacy_id` | direct | `BodyVitals_prescription` | `id` | Legacy prescription integer ID as string |
+| `legacy_source` | constant | — | — | Always `"digiswasthya_database"` |
+
+---
+
+## Visit ID Resolution
+
+```
+BodyVitals_prescription.healthcase_id
+        ↓
+visit.legacy_id  (set during visit migration — visit.legacy_id = HealthCase_healthcase.id)
+        ↓
+visit.id  (UUID used as prescription.visit_id)
+```
+
+Pre-loaded once before the loop:
+```python
+{ healthcase_id_str → visit_uuid }
+```
+
+If no matching visit found → prescription is **skipped** with a warning log.
+This happens when the visit was skipped during visit migration (e.g. patient not migrated).
+
+---
+
+## Doctor Resolution
+
+```
+BodyVitals_prescription.doctor_id
+        ↓
+Doctor_doctordetails.doctorid → name + phone
+        ↓
+new DB user table → match by (name.lower(), phone_last10) WHERE role = 'DOCTOR' AND is_active = TRUE
+        ↓
+user.id → prescription.doctor_user_id
+```
+
+Two lookups pre-loaded once before the loop:
+
+**From legacy DB:**
+```python
+{ doctor_id → (doctor_name, doctor_phone) }
+# Source: Doctor_doctordetails
+```
+
+**From new DB:**
+```python
+{ (name_lower, phone_last10) → user.id }
+# Source: user WHERE role = 'DOCTOR' AND is_active = TRUE
+# name = LOWER(TRIM(first_name || ' ' || last_name))
+# phone normalized to last 10 digits
+```
+
+> ⚠️ **TODO:** `doctor_user_id` is NOT NULL in new DB prescription table.
+> If doctor resolution returns NULL (no match), the INSERT will fail.
+> Run this query before migrating to check how many prescriptions would have NULL doctor:
+> ```sql
+> SELECT DISTINCT p.doctor_id
+> FROM "BodyVitals_prescription" p
+> WHERE p.healthcase_id IN (
+>     SELECT id FROM "HealthCase_healthcase" WHERE appdetails_id = 42
+> );
+> ```
+> Then verify each `doctor_id` exists in `Doctor_doctordetails` and
+> that the name+phone matches a `DOCTOR` role user in new DB.
+
+---
+
+## Patient Instructions (Medicine List)
+
+Legacy `prescription` column contains a JSON array of medicines:
+```json
+[
+  {"medicine": "Tab omez 20 mg", "instructions": "", "morning": true, "afternoon": false, "evening": false},
+  {"medicine": "Tab dicofenac 50 mg", "instructions": "", "morning": true, "afternoon": false, "evening": true}
+]
+```
+
+This is stored **as-is** (raw JSON string) in `patient_instructions`.
+
+> TODO: If the new app needs a specific structured format for medicines,
+> parse and reformat in `build_patient_instructions()`.
+
+---
+
+## Investigation Notes
+
+Legacy `investigation` column contains a JSON array:
+```json
+[{"investigationcat": "Blood Test", "investigationname": "Cbc rbs ecg"}]
+```
+
+Stored **as-is** (raw JSON string) in `investigation_notes`.
+
+---
+
+## Skip Logic
+
+Each prescription row is skipped if:
+
+1. **Already migrated** — `legacy_id` already exists in new DB `prescription` table (safe to re-run)
+2. **No visit found** — `healthcase_id` has no matching `visit.legacy_id` in new DB
+
+---
+
+## Fields Left NULL
+
+| Field | Why NULL | What's Needed To Fill It |
+|---|---|---|
+| `confirmed_diagnosis` | No separate confirmed diagnosis in legacy — only one `diagnosis` column | Could be set equal to `provisional_diagnosis` post-migration if needed |
+| `is_referral_recommended` | No legacy source, always `False` | Would need manual update or new business logic |
+| `referral_specialist_name` | No legacy source | No equivalent in legacy app |
+| `deleted_at` | No soft deletes in legacy | Will remain NULL |
+
+---
+
+## Final Log Summary
+
+After migration completes, the log shows:
+
+```
+═══ Prescription migration complete (appdetails_id=42) ═══
+limit=ALL | eligible=2108 | fetched=2108 | inserted=X |
+skipped(re-run)=X | skipped(no-visit)=X | errors=X |
+with_doctor=X | with_followup=X | with_investigation=X
+```
+
+| Counter | Meaning |
+|---|---|
+| `eligible` | Total Narsala prescriptions in legacy DB |
+| `fetched` | How many were fetched (affected by `--limit`) |
+| `inserted` | Successfully inserted into new DB |
+| `skipped(re-run)` | Already existed in new DB from a previous run |
+| `skipped(no-visit)` | Visit not found in new DB — visit migration skipped that healthcase |
+| `errors` | Unexpected errors during processing |
+| `with_doctor` | Rows where doctor was successfully resolved |
+| `with_followup` | Rows with a follow-up date |
+| `with_investigation` | Rows with investigation notes |
+
+---
+
+## Dependencies
+
+| Dependency | Why |
+|---|---|
+| `migrate_patient_appid42.py` must run first | Patient must exist before visit |
+| `migrate_visit_appid42.py` must run second | `visit.legacy_id` must exist before prescription can resolve `visit_id` |

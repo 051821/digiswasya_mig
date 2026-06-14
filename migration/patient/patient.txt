@@ -1,0 +1,597 @@
+    """
+    Transform one Person_persondetails row into a patient INSERT dict.
+
+    Every key in the returned dict corresponds directly to a column in the
+    target patient table. Nullable columns with no source are explicitly set
+    to None so the INSERT statement remains fully parameterised.
+
+    Full column mapping (final confirmed):
+    ┌──────────────────────────────┬────────────────────────────┬──────────────────────────────────────────┐
+    │ New Column            NULL?  │ Source (legacy)            │ Logic                                    │
+    ├──────────────────────────────┼────────────────────────────┼──────────────────────────────────────────┤
+    │ id                    NO     │ —                          │ New UUID4 (SafeIDGenerator)               │
+    │ full_name             NO     │ name                       │ Direct copy                              │
+    │ phone                 YES    │ phone                      │ Direct copy                              │
+    │ sex                   YES    │ gender                     │ Map to enum via SEX_MAP (confirmed TODO) │
+    │ date_of_birth         YES    │ dob                        │ Direct copy                              │
+    │ age_years             YES    │ dob_year                   │ calculate_age_years() — pending confirm  │
+    │ address_text          YES    │ address1 + address2        │ Concatenate with ', '                   │
+    │ address_line_1        YES    │ address1                   │ Direct copy                              │
+    │ address_line_2        YES    │ address2                   │ Direct copy                              │
+    │ district              YES    │ —                          │ NULL                                     │
+    │ state                 YES    │ —                          │ NULL                                     │
+    │ occupation            YES    │ —                          │ NULL                                     │
+    │ category              YES    │ —                          │ NULL                                     │
+    │ mother_tongue         YES    │ preferredlanguage (int)    │ map_mother_tongue() — pending confirm    │
+    │ government_id         NO     │                   │ generate_government_id()   │
+    │ center_id             YES    │ —                          │ NULL (populate after center migration)   │
+    │ created_at            NO     │ datetime_joined            │ Direct copy                              │
+    │ village_town_city     YES    │ —                          │ NULL                                     │
+    │ postal_code           YES    │ —                          │ NULL                                     │
+    │ country               YES    │ —                          │ NULL                                     │
+    │ address_resolution_m  YES    │ —                          │ NULL                                     │
+    │ pincode_master_id     YES    │ —                          │ NULL                                     │
+    │ age_months            YES    │ —                          │ NULL                                     │
+    │ health_history_json   YES    │healthcasecomment (comment_text)                            │ dict via build_health_history_json()     │
+    │ long_term_conditions  YES    │ —                          │ NULL                                     │
+    │ consent_status        YES    │ —                          │ NULL                                     │
+    │ family_id             YES    │ —                          │ NULL                                     │
+    │ patient_status        NO     │ —                          │ Hardcoded: 'CURRENT'                     │
+    │ is_demo               NO     │ —                          │ Hardcoded: FALSE                         │
+    │ deleted_at            YES    │ —                          │ NULL                                     │
+    │ tenant_id             YES    │ —                          │ NULL (set if tenant value is known)      │
+    │ phone_last10          YES    │ phone                      │ Last 10 digits via last10()              │
+    │ merged_into_patient_id YES   │ —                          │ NULL                                     │
+    │ legacy_id             YES    │ personid                   │ str(personid)                            │
+    │ legacy_source         YES    │ —                          │ 'Person_persondetails' (hardcoded)       │
+    │ legacy_extra_1        YES    │ personuid                  │ Direct copy (preserve value)             │
+    │ legacy_extra_2        YES    │ appuid                     │ Direct copy (preserve value)             │
+    │ legacy_extra_3        YES    │ hierarchy                  │ Direct copy (preserve value)             │
+    │ migrated_at           YES    │ —                          │ Current UTC timestamp                    │
+    └──────────────────────────────┴────────────────────────────┴──────────────────────────────────────────┘
+
+    IGNORED legacy columns (not inserted, rationale documented):
+      qbusername, qbpassword, qbid  → QB app credentials, not relevant in new system
+      email                         → No target column defined yet (future mapping)
+      fingerprint                   → Ignore or route to a separate biometric table
+      profilepic                    → Ignore or route to a separate media/storage table
+      djangouser_id                 → Legacy Django auth foreign key, not needed in new system
+
+    Parameters
+    ----------
+    row : mapping
+        A single row from Person_persondetails (SQLAlchemy RowMapping).
+    new_id : str
+        Pre-generated collision-safe UUID string for patient.id.
+
+    Returns
+    -------
+    dict
+        Fully populated INSERT parameter dict for the patient table.
+    """
+
+
+
+1. Connects to legacy DB and new app DB
+2. Loads all existing patient UUIDs from new DB (collision safety)
+3. Loads already-migrated legacy_ids (so re-runs are safe)
+4. Fetches all rows from Person_persondetails
+5. For each row:
+   → validates NOT NULL fields
+   → generates a new UUID4
+   → transforms columns (sex enum, address concat, phone_last10, etc.)
+   → adds to batch
+6. Commits in batches of 500 rows
+7. Writes patient_id_map.json to the project root
+
+
+The JSON ID Map Strategy
+This is the core mechanism that connects all migration scripts together.
+Understanding this is important before writing the visit script.
+The problem
+The legacy database uses integer primary keys (personid = 101, 102, 103...).
+The new app database uses UUID primary keys (id = 550e8400-..., 7f3bc1d2-...).
+The two databases have no live connection to each other during migration.
+You cannot do a SQL JOIN across them. So when migrating the Visit table,
+you need to know: "visit row with personid=101 — what is the new UUID for
+that patient in the new DB?"
+The solution — patient_id_map.json
+After the patient script runs, it writes a JSON file to the project root:
+json{
+  "101": "550e8400-e29b-41d4-a716-446655440000",
+  "102": "7f3bc1d2-4a1b-41d4-b716-123456789abc",
+  "103": "9a2ef4c8-3c1d-41d4-c826-234567890def"
+}
+Key   = old legacy personid (integer, stored as string because JSON requires string keys)
+Value = new patient UUID in the new app DB
+This file is the bridge between the two databases. Every downstream
+migration script (visit, prescription, follow-up) loads this file and
+uses it to look up the correct new UUID whenever it needs to write a
+patient_id foreign key.
+
+
+
+================================================================================
+  PATIENT MIGRATION — COMPLETE LOGIC REFERENCE
+  Script: migrate_patient.py
+  Source table: Person_persondetails (legacy DB)
+  Target table: patient (new app DB)
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 1 — HIGH-LEVEL EXECUTION FLOW
+────────────────────────────────────────────────────────────────────────────────
+
+When run as __main__, the script:
+
+  1.  Calls preview_last_patients() to display the last N rows (PREVIEW_SAMPLE_SIZE)
+      from Person_persondetails without writing anything to the new DB.
+
+  2.  Prompts the operator: "Migrate to new DB? (yes/no)"
+
+  3.  If confirmed, calls migrate_patient(id_map={}) which:
+        a. Connects to legacy DB and new app DB.
+        b. Loads center code → UUID lookup from new DB center table (once).
+        c. Loads already-migrated legacy_ids from new DB patient table (idempotency).
+        d. Fetches ALL rows from Person_persondetails ORDER BY personid.
+        e. Pre-loads health history comments and appdetails_id lookups from legacy DB.
+        f. For each row:
+             – Skips if already migrated (re-run safety).
+             – Validates NOT NULL fields; skips with WARNING on failure.
+             – Generates a new collision-safe UUID4.
+             – Transforms and maps all columns.
+             – Adds to in-memory batch.
+        g. Commits each batch of BATCH_SIZE rows (default 500) to new DB.
+        h. Back-fills id_map for rows skipped as "already migrated".
+        i. Logs final summary counters.
+
+  4.  Writes patient_id_map.json to the project root.
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 2 — DATABASE CONNECTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  get_legacy_engine()   → SQLAlchemy engine for the legacy Django/PostgreSQL DB.
+  get_new_engine()      → SQLAlchemy engine for the new application DB.
+
+  Both are imported from config.db.
+  Batch inserts use a SQLAlchemy Session with session.commit() per batch.
+  Read queries use engine.connect() with .fetchall() (no transaction held open).
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 3 — COLUMN MAPPING TABLE
+────────────────────────────────────────────────────────────────────────────────
+
+  New Column                NULL?   Source (legacy)             Logic
+  ─────────────────────────────────────────────────────────────────────────────
+  id                         NO     —                           New UUID4 (SafeIDGenerator)
+  full_name                  NO     name                        Direct copy
+  phone                     YES     phone                       normalize_phone()
+  sex                       YES     gender                      map_gender() → SEX_MAP enum
+  date_of_birth             YES     dob                         Direct copy (date/datetime)
+  age_years                 YES     dob / dob_year              calculate_age_years()
+  age_months                YES     —                           NULL
+  address_text              YES     address1 + address2         concat_address() — ", " join
+  address_line_1            YES     address1                    Direct copy
+  address_line_2            YES     address2                    Direct copy
+  district                  YES     —                           NULL
+  state                     YES     —                           NULL
+  village_town_city         YES     —                           NULL
+  postal_code               YES     —                           NULL
+  country                   YES     —                           NULL
+  address_resolution_method YES     —                           NULL
+  pincode_master_id         YES     —                           NULL
+  occupation                YES     —                           NULL
+  category                  YES     —                           NULL
+  mother_tongue             YES     preferredlanguage (int)     map_mother_tongue() (pass-through)
+  government_id              NO     name + dob/dob_year         generate_govt_id()
+  health_history_json       YES     HealthCase comment JSON     build_health_history_json()
+  long_term_conditions      YES     —                           NULL
+  consent_status            YES     —                           NULL
+  patient_status             NO     —                           Hardcoded: 'CURRENT'
+  is_demo                    NO     —                           Hardcoded: FALSE
+  center_id                 YES     HealthCase.appdetails_id    resolve_center_id()
+  family_id                 YES     —                           NULL
+  merged_into_patient_id    YES     —                           NULL
+  created_at                 NO     datetime_joined             Direct copy
+  deleted_at                YES     —                           NULL
+  migrated_at               YES     —                           datetime.now(UTC) at run time
+  tenant_id                 YES     —                           NULL
+  phone_last10              YES     phone                       normalize_phone() (same value)
+  legacy_id                 YES     personid                    str(personid)
+  legacy_source             YES     —                           Hardcoded: 'Person_persondetails'
+  legacy_extra_1            YES     personuid                   Direct copy
+  legacy_extra_2            YES     appuid                      Direct copy
+  legacy_extra_3            YES     hierarchy                   Direct copy
+
+  IGNORED LEGACY COLUMNS (not inserted):
+    qbusername, qbpassword, qbid  → QB app credentials; not relevant in new system
+    email                         → No target column yet; future mapping
+    fingerprint                   → Route to separate biometric table
+    profilepic                    → Route to separate media/storage table
+    djangouser_id                 → Legacy Django auth FK; not needed
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 4 — TRANSFORMATION FUNCTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  4.1  normalize_phone(phone) → str | None
+  ─────────────────────────────────────────
+  Strips all non-digit characters from phone.
+  If result < 10 digits  → store as-is with WARNING log.
+  If result > 10 digits  → keep last 10 digits (strips country code prefix).
+  If result = 10 digits  → return as-is.
+  Returns None for NULL or blank input.
+  phone_last10 receives the same value as phone.
+
+  4.2  map_gender(raw) → str | None
+  ──────────────────────────────────
+  Normalises legacy gender string to a canonical enum.
+  Lookup is case-insensitive (value is lower-stripped before matching).
+
+    Input values          → Output
+    ──────────────────────────────
+    "m", "male", "1"      → "MALE"
+    "f", "female", "0"    → "FEMALE"
+    "other", "o"          → "OTHER"
+    None or unrecognised  → None  (WARNING logged for unrecognised values)
+
+  4.3  _parse_birth_date(dob) → date | None
+  ──────────────────────────────────────────
+  Accepts datetime objects, date objects, or ISO-format strings ("YYYY-MM-DD").
+  Returns a date object or None on failure.
+
+  4.4  calculate_age_years(row) → int | None
+  ───────────────────────────────────────────
+  Primary source: row["dob"] parsed via _parse_birth_date().
+    age = today.year − birth.year − correction for birthday not yet passed.
+    Result clamped to ≥ 0.
+  Fallback: row["dob_year"] as integer.
+    age = current_year − dob_year.
+  Returns None if both sources are absent or unparseable.
+
+  4.5  concat_address(addr1, addr2) → str | None
+  ─────────────────────────────────────────────
+  Strips both parts; joins non-empty parts with ", ".
+  Returns None if both parts are blank.
+
+  4.6  map_mother_tongue(raw) → int | None
+  ─────────────────────────────────────────
+  Pass-through: returns raw value (integer language code) unchanged.
+  Returns None for NULL input.
+
+  4.7  generate_govt_id(row) → str
+  ─────────────────────────────────
+  Derives a deterministic human-readable government identifier
+  from name + birth year. Used when no official govt ID is present.
+
+  Name parsing rules (full_name split by whitespace):
+    ≥ 2 parts, first ≥ 3 chars, last ≥ 3 chars → first[:3].upper() + last[:3].upper() + year
+    ≥ 2 parts, first < 3 chars               → first.upper()      + last[:3].upper() + year
+    ≥ 2 parts, last < 3 chars                → first[:3].upper()  + last.upper()     + year
+    1 part                                    → part.upper() + year
+    0 parts (blank name)                      → "MIGRATED-{personid}{year}"
+
+  year is derived from dob (preferred) or dob_year; defaults to "" if both absent.
+
+  4.8  validate_row(raw) → list[str]
+  ────────────────────────────────────
+  Returns a list of blocking validation error strings.
+  An empty list means the row is valid and can be inserted.
+
+  Checks:
+    – name is not NULL and not empty  (maps to NOT NULL full_name)
+    – datetime_joined is not NULL     (maps to NOT NULL created_at)
+
+  Rows that fail validation are skipped entirely with a WARNING log.
+  They are counted in the "errors" summary counter.
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 5 — HEALTH HISTORY LOGIC
+────────────────────────────────────────────────────────────────────────────────
+
+  5.1  How the comment is reached (no direct FK on comments table)
+  ──────────────────────────────────────────────────────────────────
+  Person_persondetails.personid
+    → HealthCase_healthcase.person_id       (latest healthcase per person)
+    → HealthCase_commentshealthcase.healthcase_id = HealthCase_healthcase.id
+    → HealthCase_commentshealthcase.commenttext
+
+  SQL used (_HEALTH_COMMENT_SQL):
+    DISTINCT ON (hc.person_id)
+    Ordered by: COALESCE(hc.lastupdated, hc.created_at) DESC, hc.id DESC, c.commentid DESC
+    Filters:   commenttext IS NOT NULL AND TRIM(commenttext) <> ''
+
+  Result: health_lookup dict  →  { person_id (int): commenttext (str) }
+
+  5.2  build_health_history_json(commenttext) → dict | None
+  ────────────────────────────────────────────────────────────
+  Input: raw commenttext string (expected to be a JSON object).
+
+  Step 1: Parse JSON. If unparseable or not a dict → return None with WARNING.
+
+  Step 2: Build the canonical health_history_json structure using _empty_health_history():
+
+    Conditions initialised to:
+      { "present": False, "notes": "" }       for most conditions
+      { "present": False, "qty": "" }         for: alcohol, smoking
+
+    Full condition list:
+      asthma, alcohol, smoking, thyroid, diabetes, surgeries,
+      hypertension, tuberculosis, heart_disease, drug_allergies,
+      high_cholesterol, hospitalisations
+
+    Plus a top-level "other_notes": "" key.
+
+  Step 3: Map legacy question strings to new keys via _CONDITION_MAP:
+
+    Legacy question key                              → New key(s)
+    ──────────────────────────────────────────────────────────────
+    "Do you consume alcohol?"                        → ["alcohol"]
+    "Do you have asthma?"                            → ["asthma"]
+    "Do you have hypertension?"                      → ["hypertension"]
+    "Do you have diabetes?"                          → ["diabetes"]
+    "Do you have heart diease?"                      → ["heart_disease"]
+    "Do you have high cholestrol?"                   → ["high_cholesterol"]
+    "Do you have any drug allergies?"                → ["drug_allergies"]
+    "Any history of past surgery or hospitalization?"→ ["surgeries", "hospitalisations"]
+    "Do you smoke?"                                  → ["smoking"]
+
+  Step 4: For each mapped key, call _parse_yes_no(raw_val):
+    True values:  "yes", "y", "true", "1", True
+    False values: "no", "n", "false", "0", "", False
+    Unrecognised: → False with WARNING log
+
+  Step 5: Set result[new_key]["present"] = True/False for each mapped condition.
+
+  Returns None when commenttext is absent; returns full schema dict otherwise
+  (even if all conditions resolved to False).
+
+  5.3  Conditions NOT mapped from legacy data
+  ─────────────────────────────────────────────
+  These remain at their default False/empty values because no legacy question
+  maps to them:  thyroid, tuberculosis.
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 6 — CENTER MAPPING LOGIC
+────────────────────────────────────────────────────────────────────────────────
+
+  6.1  Overview of the resolution chain
+  ──────────────────────────────────────
+  Person_persondetails.personid
+    → HealthCase_healthcase.person_id   (latest healthcase per person)
+    → HealthCase_healthcase.appdetails_id
+    → APPID_TO_CENTER_CODE              (static dict in script)
+    → center.center_code                (looked up in new DB at runtime)
+    → center.id (UUID)
+    → patient.center_id
+
+  No UUIDs are hardcoded in the script. All UUIDs come from the new DB.
+
+  6.2  APPID_TO_CENTER_CODE
+  ──────────────────────────
+  Static mapping of legacy Doctor_appdetails.appid → business center code:
+
+    appid   center_code      Location
+    ──────────────────────────────────────────────────
+    45      DS-TMC-012       Bharatwada / Vijay Nagar
+    42      DS-TMC-009       Narsala
+    41      DS-TMC-015       Karanjawane
+    43      DS-TMC-010       Hasanbagh
+    44      DS-TMC-011       Chakole
+    37      DS-TMC-004       Itaunja
+    67      TMC-DSF0018      Khodala / Palghar
+    40      DS-TMC-007       IGR / Dharampeth
+    24      DS-TMC-013       Peth
+
+  UNRESOLVED_APP_IDS (return NULL without WARNING, known to have no mapping):
+    15, 16, 17, 18, 19, 20, 21, 31, 32, 36
+
+  6.3  load_center_code_to_uuid(new_engine) → dict[str, str]
+  ────────────────────────────────────────────────────────────
+  Executes once per migration run:
+    SELECT id::text, center_code FROM center WHERE center_code IS NOT NULL
+
+  Returns: { "DS-TMC-012": "<uuid>", "DS-TMC-009": "<uuid>", ... }
+  Logs the count and sorted list of loaded center codes on INFO.
+
+  6.4  map_appid_to_center_uuid(appid, center_code_to_uuid) → str | None
+  ────────────────────────────────────────────────────────────────────────
+  Step 1: Cast appid to int; return None if unparseable.
+  Step 2: If appid ∈ UNRESOLVED_APP_IDS → return None (silent).
+  Step 3: Look up APPID_TO_CENTER_CODE; if not found → return None.
+  Step 4: Look up center_code_to_uuid:
+            – Found   → log DEBUG audit line, return UUID.
+            – Missing → log WARNING "No center found for appdetails_id=X center_code=Y",
+                        return None.
+
+  6.5  resolve_center_id(personid, appuid, healthcase_appdetails_by_person_id,
+                          center_code_to_uuid) → str | None
+  ──────────────────────────────────────────────────────────────────────────────
+  Priority 1 (preferred): HealthCase path
+    – Look up personid in healthcase_appdetails_by_person_id.
+    – If appdetails_id found → call map_appid_to_center_uuid().
+    – Log DEBUG audit: person_id / appdetails_id / center_code / center_id.
+    – Return result (UUID or None); do not fall through to priority 2.
+
+  Priority 2 (fallback): Person_persondetails.appuid
+    – Used only when person_id has NO entry in healthcase_appdetails_by_person_id.
+    – Call map_appid_to_center_uuid(appuid, center_code_to_uuid).
+
+  Priority 3: NULL
+    – appuid also unmapped → return None.
+
+  6.6  Audit log format (DEBUG level)
+  ─────────────────────────────────────
+  On success:
+    Center audit: person_id=14050 appdetails_id=45 center_code=DS-TMC-012
+                  center_id=e789cb5e-74e9-4117-9b5d-3647996263ef
+
+  On missing center_code in center table (WARNING level):
+    No center found for appdetails_id=45 center_code=DS-TMC-012 — center_id will be NULL
+
+  6.7  Pre-loading the appdetails lookup (_CENTER_APPDETAILS_SQL)
+  ───────────────────────────────────────────────────────────────
+  Same DISTINCT ON ordering as the health comment query:
+    DISTINCT ON (person_id)
+    ORDER BY person_id, COALESCE(lastupdated, created_at) DESC, id DESC
+
+  Result: healthcase_appdetails_by_person_id  →  { person_id (int): appdetails_id (int) }
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 7 — ID GENERATION AND COLLISION SAFETY
+────────────────────────────────────────────────────────────────────────────────
+
+  SafeIDGenerator (from utils.id_gen):
+    – Generates UUID4 strings.
+    – On initialisation, loads all existing patient.id values from new DB into
+      a set to guarantee no collisions on re-runs or concurrent scripts.
+    – .next() returns the next unique UUID.
+
+  get_migrated_legacy_ids (from utils.id_gen):
+    – Returns the set of all legacy_id strings already in patient table.
+    – Used at the top of migrate_patient() to skip rows already inserted
+      on a previous run (idempotent re-runs).
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 8 — BATCH INSERT STRATEGY
+────────────────────────────────────────────────────────────────────────────────
+
+  Batch size: BATCH_SIZE (from config.config, default 500).
+
+  _prepare_row_for_insert(record):
+    – Wraps health_history_json value in psycopg2.extras.Json() so SQLAlchemy
+      text() parameterised query passes it correctly as JSONB to PostgreSQL.
+    – All other fields pass through unchanged.
+
+  _flush_batch(new_engine, batch):
+    – In DRY_RUN mode: logs count, returns without writing.
+    – Otherwise: opens a Session, executes INSERT_SQL with all rows,
+      commits once per batch.
+
+  INSERT uses ON CONFLICT (id) DO NOTHING:
+    – Safe against duplicate UUID collisions (should not occur with SafeIDGenerator,
+      but provides an extra safety net).
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 9 — THE patient_id_map.json BRIDGE FILE
+────────────────────────────────────────────────────────────────────────────────
+
+  Purpose:
+    The legacy DB uses integer PKs (personid).
+    The new DB uses UUID PKs (id).
+    The two databases are never joined live during migration.
+    All downstream migration scripts (visit, prescription, follow-up, etc.)
+    need to write patient_id (a UUID FK) from only a legacy personid.
+    patient_id_map.json is the offline bridge between them.
+
+  Format:
+    {
+      "101": "550e8400-e29b-41d4-a716-446655440000",
+      "102": "7f3bc1d2-4a1b-41d4-b716-123456789abc",
+      "103": "9a2ef4c8-3c1d-41d4-c826-234567890def"
+    }
+    Key   = legacy personid as string (JSON requires string keys)
+    Value = new patient UUID in the new DB
+
+  Written to: <project_root>/patient_id_map.json
+
+  Back-fill logic (re-run safety):
+    If a row was skipped as "already migrated", its id_map entry is temporarily
+    set to the sentinel "__already_migrated__". After the main loop, the script
+    re-queries patient WHERE legacy_id IS NOT NULL and overwrites those sentinel
+    entries with the actual UUIDs from the new DB.
+    This ensures id_map is fully populated regardless of which run inserted each row.
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 10 — PREVIEW MODE
+────────────────────────────────────────────────────────────────────────────────
+
+  preview_last_patients(limit=PREVIEW_SAMPLE_SIZE):
+    – Loads center lookup and migration lookups (same as production run).
+    – Fetches last N rows from Person_persondetails ORDER BY personid DESC.
+    – For each row, runs validation and builds the full patient record using
+      a temporary preview UUID (not saved anywhere).
+    – Logs a JSON payload for each row showing all resolved values:
+        legacy_id, id (preview), full_name, phone, phone_last10, sex,
+        date_of_birth, age_years, government_id, healthcase_id,
+        healthcase_appdetails_id, center_id, health_history_json,
+        comment_snippet (first 200 chars), address_text, created_at,
+        legacy_extra_2_appuid
+    – Rows that would be skipped (validation failure) log a WARNING instead.
+    – Writes NOTHING to the new DB.
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 11 — LOGGING AND SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+  Logger name: "migrate_patient"  (from utils.logger.get_logger)
+
+  Key log lines emitted during a full run:
+    INFO   Loaded N center records from new DB: [list of codes]
+    INFO   Already migrated in new DB: N patient rows
+    INFO   Fetched N rows from Person_persondetails
+    INFO   Loaded health history for N patients (via HealthCase join)
+    INFO   Loaded center mapping (person_id → appdetails_id) for N patients
+    INFO   Lookup audit: N with health comment, N with center appdetails_id, N with both
+    INFO   … N / TOTAL rows committed  (per batch)
+    DEBUG  SKIP (already migrated) personid=X
+    DEBUG  Center audit: person_id=... appdetails_id=... center_code=... center_id=...
+    WARNING  SKIP personid=X — blocking validation failed: <reason>
+    WARNING  No center found for appdetails_id=X center_code=Y — center_id will be NULL
+    WARNING  Unknown gender value 'Z' — sex will be NULL
+    WARNING  Phone 'ABC' has fewer than 10 digits (N) — storing as-is
+    WARNING  Could not parse commenttext as JSON: ...
+    WARNING  Unexpected health answer 'Q' — treating as False
+
+  Final summary line:
+    ═══ Patient migration complete ═══
+    total_legacy=N | inserted=N | skipped(re-run)=N | errors=N |
+    with_health_history=N | with_center_id=N
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 12 — CONFIGURATION CONSTANTS (from config.config)
+────────────────────────────────────────────────────────────────────────────────
+
+  BATCH_SIZE          Number of rows per DB commit (default: 500)
+  DRY_RUN             If True, skips all DB writes; logs "[DRY RUN] Would insert N rows"
+  PREVIEW_SAMPLE_SIZE Number of rows shown in preview mode
+
+
+────────────────────────────────────────────────────────────────────────────────
+SECTION 13 — EXTERNAL DEPENDENCIES
+────────────────────────────────────────────────────────────────────────────────
+
+  Standard library:
+    json, sys, os, uuid, datetime, typing
+
+  Third-party:
+    psycopg2         – psycopg2.extras.Json() for JSONB binding
+    sqlalchemy       – engine, Session, text()
+
+  Internal modules:
+    config.db        – get_legacy_engine(), get_new_engine()
+    config.config    – BATCH_SIZE, DRY_RUN, PREVIEW_SAMPLE_SIZE
+    utils.id_gen     – SafeIDGenerator, get_migrated_legacy_ids
+    utils.logger     – get_logger()
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+
+Destination - postgresql://postgres.okqyofwzjohjdgczbnro:AIArogya2026#@aws-1-us-east-2.pooler.supabase.com:6543/postgres
+Source - SUPABASE_URI="postgresql://postgres.pzzyfmyepedthrdophcf:Migration2026!@#@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
